@@ -5,5 +5,5 @@ TTGO board hooked up with BME280 and connected to TTN through LoRa.
 * /src : PlatformIO project.
 * /node-RED : node-RED app retrieving LoRa payload from The Things Network
 
-## Documentation [here](https://marcoroda.com/projects/2020/03/03/TTGO-LORA-TTN.html)
+Project documentation [here](https://marcoroda.com/projects/2020/03/03/TTGO-LORA-TTN.html)
 
