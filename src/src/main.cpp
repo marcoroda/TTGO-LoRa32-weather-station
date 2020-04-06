@@ -9,7 +9,7 @@
 #include <hal/hal.h>
 #include <SPI.h>
 #include <SSD1306.h>
-#include "device_config.h"
+#include "_device_config.h"
 
 
 #define LEDPIN 2
