@@ -1,7 +1,10 @@
-
 /*
-    Example code taken from otaa example 
-    Mar 2020
+    OTAA auth core code taken from otaa example
+    - Reads sensor values from BME280 and sends it to TTN
+    - ...
+    
+    author: Marco Roda, marcoroda.com
+    date:   Mar 2020
 */
 
 #include <Arduino.h>
@@ -9,25 +12,37 @@
 #include <hal/hal.h>
 #include <SPI.h>
 #include <SSD1306.h>
-#include "_device_config.h"
+#include "_device_config.h" /* Replace by device_config.h and add TTN keys to it */
 
+#include "Bme280.h"
 
+/* Blue LED on TTGO LILYGO -> To signal TX-ing*/
 #define LEDPIN 2
 
+/* OLED Display I2C pins and Reset */
 #define OLED_I2C_ADDR 0x3C
 #define OLED_RESET 16
 #define OLED_SDA 4
 #define OLED_SCL 15
 
+/* OLED display instance */
+SSD1306 display (OLED_I2C_ADDR, OLED_SDA, OLED_SCL);
+
+/* Bme280 object */
+Bme280 bme280;
+
+#define NBR_MEAS            (3) /* Number or meas to send over LoRa to TTN */
+#define LEN_MEAS_BYTES      (2) /* number of bytes it takes each sensor meas*/
+#define LEN_PAYLOAD         ( NBR_MEAS * LEN_MEAS_BYTES )
+
+/* Aux vars */
 uint32_t counter    = 0;
 uint8_t  cnt_mroda  = 0;
-
 uint8_t addr = 0;
 float_t sensor_val[5] = {0.0, 0.1, 0.2, 0.3, 0.4};
 
 char TTN_response[30];
 
-SSD1306 display (OLED_I2C_ADDR, OLED_SDA, OLED_SCL);
 
 /* Get TTN credentials */
 void os_getDevEui (u1_t* buf) { memcpy_P(buf, DEVEUI, 8);}
@@ -56,7 +71,7 @@ float read_sensor(uint8_t addr)
 
 void send_uptime_OLED(unsigned long time)
 {
-    display.drawString(0, 40, "Up Time in [s]: ");
+    display.drawString(0, 40, "Up Time in [min]: ");
     display.drawString(80, 40, String(time));
 }
 
@@ -73,32 +88,56 @@ void send_sensor_val_OLED(uint8_t addr)
 uint32_t get_time(void)
 {
     uint32_t scaled_time = 0;
-    scaled_time = (uint32_t) (millis() / 1000) / 60; // in seconds
+    scaled_time = (uint32_t) (millis() / 1000) / 60; // in minutes
 
     return scaled_time;
 }
 
-// Payload to send (uplink)
-#define LEN_PAYLOAD     (10)
-
-xref2u1_t gen_TX_msg(void)
+/*! @brief  Returns a pointer to the payload data to be sent over LoRa
+ *
+ */
+uint8_t* gen_TX_msg(uint8_t incr)
 {
-    static uint8_t message[LEN_PAYLOAD] = {0};
-    message[0] = 10;
-    message[1] = 14;
-    message[2] = 20;
-    return message;
+    /* LoRa payload array message */
+    static uint8_t payload_lora[LEN_PAYLOAD] = {0};
+
+    /* Get sensor values */
+    float temperature = bme280.getTemperature() + incr;
+    float humidity    = bme280.getHumidity() + incr;
+    float pressure    = bme280.getPressure() + incr;
+
+    int16_t celciusInt  = temperature * 100; // convert to signed 16 bits integer
+    payload_lora[0]     = celciusInt >> 8;
+    payload_lora[1]     = celciusInt;
+
+    int16_t humidityInt = humidity * 100;
+    payload_lora[2]     = humidityInt >> 8;
+    payload_lora[3]     = humidityInt;
+
+    int16_t pressureInt = pressure    * 100;
+    payload_lora[4]     = pressureInt >> 8;
+    payload_lora[5]     = pressureInt;
+    
+    return payload_lora;
 }
 
 
 void do_send(osjob_t* j){
+
     // Check if there is not a current TX/RX job running
     if (LMIC.opmode & OP_TXRXPEND) {
         Serial.println(F("OP_TXRXPEND, not sending"));
     } else {
-        // Prepare upstream data transmission at the next possible time.
+        /* Prepare upstream data transmission at the next possible time */
         
-        LMIC_setTxData2(1, gen_TX_msg(), sizeof(uint8_t)*LEN_PAYLOAD-1, 0);
+        // LMIC_setTxData2(1, (uint8_t*)&temperature, sizeof(float), 0);
+        LMIC_setTxData2(1, gen_TX_msg(cnt_mroda), LEN_PAYLOAD, 0);
+        cnt_mroda++;
+        if(cnt_mroda == 20)
+        {
+            cnt_mroda = 0;
+        }
+        
         Serial.println(F("Sending uplink packet..."));
         digitalWrite(LEDPIN, HIGH);
         display.clear();
@@ -109,38 +148,39 @@ void do_send(osjob_t* j){
     // Next TX is scheduled after TX_COMPLETE event.
 }
 
-void onEvent (ev_t ev) {
+void onEvent (ev_t event) {
     Serial.print(os_getTime());
     Serial.print(": ");
-    switch(ev) {
-           case EV_TXCOMPLETE:
+    switch(event)
+    {
+        case EV_TXCOMPLETE:
             Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
             display.clear();
             display.drawString (0, 0, "TX Done ...");
 
             if (LMIC.txrxFlags & TXRX_ACK) {
-              Serial.println(F("Received ack"));
-              display.drawString (0, 20, "Received ACK.");
+                Serial.println(F("Received ack"));
+                display.drawString (0, 20, "Received ACK.");
             }
 
             if (LMIC.dataLen) {
-              int i = 0;
-              // data received in rx slot after tx
-              Serial.print(F("Data Received: "));
-              Serial.write(LMIC.frame+LMIC.dataBeg, LMIC.dataLen);
-              Serial.println();
-              Serial.println(LMIC.rssi);
+                int i = 0;
+                // data received in rx slot after tx
+                Serial.print(F("Data Received: "));
+                Serial.write(LMIC.frame+LMIC.dataBeg, LMIC.dataLen);
+                Serial.println();
+                Serial.println(LMIC.rssi);
 
-              display.drawString (0, 9, "Received DATA.");
-              for ( i = 0 ; i < LMIC.dataLen ; i++ )
+                display.drawString (0, 9, "Received DATA.");
+                for ( i = 0 ; i < LMIC.dataLen ; i++ )
                 TTN_response[i] = LMIC.frame[LMIC.dataBeg+i];
-              TTN_response[i] = 0;
-              display.drawString (0, 22, String(TTN_response));
-              display.drawString (0, 32, String(LMIC.rssi));
-              display.drawString (64,32, String(LMIC.snr));
+                TTN_response[i] = 0;
+                display.drawString (0, 22, String(TTN_response));
+                display.drawString (0, 32, String(LMIC.rssi));
+                display.drawString (64,32, String(LMIC.snr));
             }
 
-             /* Schedule next transmission */
+                /* Schedule next transmission */
             os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
             digitalWrite(LEDPIN, LOW);
             display.drawString (0, 50, String (counter));
@@ -159,6 +199,7 @@ void onEvent (ev_t ev) {
             // Schedule next transmission
             os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
             break;
+
         case EV_JOINING:
             Serial.println(F("EV_JOINING: -> Joining..."));
             display.drawString(0,16 , "OTAA joining...");
@@ -169,34 +210,37 @@ void onEvent (ev_t ev) {
 
             display.display();
             break;
-        case EV_JOINED: {
-              Serial.println(F("EV_JOINED"));
-              display.clear();
-              display.drawString(0 , 0 ,  "Joined!");
-              display.display();
-              // Disable link check validation (automatically enabled
-              // during join, but not supported by TTN at this time).
-              LMIC_setLinkCheckMode(0);
-            }
+        case EV_JOINED:
+            Serial.println(F("EV_JOINED"));
+            display.clear();
+            display.drawString(0 , 0 ,  "Joined!");
+            display.display();
+            // Disable link check validation (automatically enabled
+            // during join, but not supported by TTN at this time).
+            LMIC_setLinkCheckMode(0);
             break;
+
         case EV_RXCOMPLETE:
             // data received in ping slot
             Serial.println(F("EV_RXCOMPLETE"));
             break;
+
         case EV_LINK_DEAD:
             Serial.println(F("EV_LINK_DEAD"));
             break;
+
         case EV_LINK_ALIVE:
             Serial.println(F("EV_LINK_ALIVE"));
             break;
-         default:
+
+        default:
             Serial.println(F("Unknown event"));
             break;
     }
-
 }
 
-void setup() {
+void setup(void)
+{
     Serial.begin(9600);
     delay(2500); /* Give the Serial comm sometime to pick up */
     Serial.println(F("Starting..."));
@@ -219,12 +263,23 @@ void setup() {
     display.drawString (0, 0, "Starting....");
     display.display ();
 
+    /* BME280 init */
+    // if( !bme280.init() )
+    // {
+    //     Serial.println(F("BME280 init failed!!"));
+    // }
+    // else
+    // {
+    //     bme280.printBmeValues();
+    // }
+    
     /* LMIC init */
     os_init();
 
     // Reset the MAC state. Session and pending data transfers will be discarded.
     LMIC_reset();
     LMIC_setClockError(MAX_CLOCK_ERROR * 1 / 100);
+    
     /*  Set up the channels used by the Things Network, which corresponds
         to the defaults of most gateways. Without this, only three base
         channels from the LoRaWAN specification are used, which certainly
@@ -243,6 +298,7 @@ void setup() {
     LMIC_setupChannel(6, 867700000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
     LMIC_setupChannel(7, 867900000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
     LMIC_setupChannel(8, 868800000, DR_RANGE_MAP(DR_FSK,  DR_FSK),  BAND_MILLI);      // g2-band
+    
     /*  TTN defines an additional channel at 869.525Mhz using SF9 for class B
         devices' ping slots. LMIC does not have an easy way to define set this
         frequency and support for class B is spotty and untested, so this
@@ -258,12 +314,14 @@ void setup() {
     LMIC_setDrTxpow(DR_SF11,14);
     // LMIC_setDrTxpow(DR_SF7,14);
 
-    // Start job
-    do_send(&sendjob);     // Will fire up also the join
+    /* Start job */
+    do_send(&sendjob);     // Will fire up also the joinning to TTN
     //LMIC_startJoining();
 }
 
 
-void loop() {
+/* App's While(True) */
+void loop()
+{
     os_runloop_once();
 }
